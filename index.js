@@ -27,13 +27,15 @@ async function run() {
     
     const db = client.db("devpilot");
     const projectsCollection = db.collection("projects");
+    const aiGenerationsCollection = db.collection("ai_generations");
 
     console.log(" 🟢 Successfully connected to MongoDB and initialized collections!");
+    
     app.post('/api/generate-blueprint', async (req, res) => {
       try {
-        const { projectName, category, description, targetUsers, selectedTech } = req.body;
+        const { projectName, category, description, targetUsers, selectedTech, userId } = req.body;
 
-        if (!projectName || !category || !description || !targetUsers) {
+        if (!projectName || !category || !description || !targetUsers || !userId) {
           return res.status(400).json({ success: false, error: "Missing required fields" });
         }
 
@@ -83,6 +85,7 @@ async function run() {
         }
 
         const newProject = {
+          userId,
           projectName,
           category,
           description,
@@ -180,29 +183,121 @@ app.patch('/api/projects/:id', async (req, res) => {
     });
 
     // dashboard/projects endpoint to fetch all projects with pagination
-
- app.get('/api/projects', async (req, res) => {
+  app.get('/api/projects', async (req, res) => {
   try {
-    const { search } = req.query; 
+    const { search, userId } = req.query; 
     let query = {};
-
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required to fetch projects" });
+    }
+    query.userId = userId;
     if (search) {
-      query = {
-        $or: [
-          { projectName: { $regex: search, $options: 'i' } }, 
-          { category: { $regex: search, $options: 'i' } }
-        ]
-      };
+      query.$and = [
+        { userId: userId }, 
+        {
+          $or: [
+            { projectName: { $regex: search, $options: 'i' } }, 
+            { category: { $regex: search, $options: 'i' } }
+          ]
+        }
+      ];
     }
 
     const projects = await projectsCollection.find(query).sort({ _id: -1 }).toArray();
     res.json({ success: true, projects });
+
   } catch (error) {
-    console.error("Error fetching projects with regex search:", error);
+    console.error("Error fetching projects with user filtering:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// ai_generations endpoint to fetch all AI generations with pagination
+
+app.post('/api/projects/:id/generations', async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    const { prompt } = req.body;
+
+    if (!prompt || !prompt.trim()) {
+      return res.status(400).json({ success: false, error: "Prompt is required" });
+    }
+
+    const project = await projectsCollection.findOne({ _id: new ObjectId(projectId) });
+    if (!project) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
+    
+    const geminiPrompt = `
+      You are DevPilot Copilot, an expert AI software engineer. 
+      You are helping the user build and expand a project.
+      
+      [PROJECT CONTEXT]
+      Project Name: ${project.projectName}
+      Category: ${project.category}
+      Target Users/Scale: ${project.targetUsers}
+      Tech Stack: ${project.selectedTech ? project.selectedTech.join(", ") : "Not specified"}
+      
+      [CURRENT BLUEPRINT]
+      Overview: ${project.blueprint?.overview || "N/A"}
+      Core Modules: ${project.blueprint?.modules ? project.blueprint.modules.join(", ") : "N/A"}
+      Schema Layout: ${project.blueprint?.schemaDesign || "N/A"}
+      
+      [USER'S REQUEST]
+      "${prompt}"
+      
+      Instructions: Respond to the user's request precisely. If they ask for code, route config, database queries, or module expansions, provide clean, robust, and industry-standard solutions that perfectly align with the configured tech stack. Keep explanations clear and concise.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: geminiPrompt
+    });
+
+    const generatedOutput = response.text;
+    const newGeneration = {
+      projectId: new ObjectId(projectId), 
+      prompt,
+      generatedOutput,
+      createdAt: new Date()
+    };
+    const result = await aiGenerationsCollection.insertOne(newGeneration);
+
+    res.status(201).json({
+      success: true,
+      message: "AI Generation completed and saved successfully",
+      generation: {
+        _id: result.insertedId,
+        ...newGeneration
+      }
+    });
+
+  } catch (error) {
+    console.error("Error in POST /api/projects/:id/generations:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 
+
+app.get('/api/projects/:id/generations', async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    const generations = await aiGenerationsCollection
+      .find({ projectId: new ObjectId(projectId) })
+      .sort({ createdAt: 1 }) 
+      .toArray();
+
+    res.json({
+      success: true,
+      generations
+    });
+
+  } catch (error) {
+    console.error("Error in GET /api/projects/:id/generations:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
     // text upore
 
