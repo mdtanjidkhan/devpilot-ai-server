@@ -7,6 +7,7 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
 const uri = process.env.MONGODB_URI;
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 app.use(cors());
 app.use(express.json());
@@ -28,8 +29,9 @@ async function run() {
     const db = client.db("devpilot");
     const projectsCollection = db.collection("projects");
     const aiGenerationsCollection = db.collection("ai_generations");
-
-    console.log(" 🟢 Successfully connected to MongoDB and initialized collections!");
+    const profilesCollection = db.collection("profiles");
+    await profilesCollection.createIndex({ userId: 1 }, { unique: true });
+    console.log("  Successfully connected to MongoDB and initialized collections!");
     
     app.post('/api/generate-blueprint', async (req, res) => {
       try {
@@ -108,7 +110,45 @@ async function run() {
         res.status(500).json({ success: false, error: error.message });
       }
     });
-    app.get('/api/projects/:id', async (req, res) => {
+  // dashboardpage dynamic name count or card data fetch
+
+  app.get('/api/dashboard/stats', async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
+    }
+
+    const projects = await db.collection("projects")
+      .find({ userId: userId })
+      .sort({ createdAt: -1 }) 
+      .toArray();
+
+    const totalProjects = projects.length;
+    
+    const totalAiGenerations = await db.collection("ai_generations")
+      .countDocuments({ userId: userId });
+    const savedBlueprints = totalProjects; 
+
+    res.status(200).json({
+      success: true,
+      projects,
+      stats: {
+        totalProjects,
+        totalAiGenerations,
+        savedBlueprints
+      }
+    });
+
+  } catch (error) {
+    console.error("Dashboard backend error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+   app.get('/api/projects/:id', async (req, res) => {
       try {
         const id = req.params.id;
   
@@ -217,7 +257,8 @@ app.patch('/api/projects/:id', async (req, res) => {
 app.post('/api/projects/:id/generations', async (req, res) => {
   try {
     const projectId = req.params.id;
-    const { prompt } = req.body;
+    const { prompt, generationType,user} = req.body;
+    
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ success: false, error: "Prompt is required" });
@@ -226,6 +267,23 @@ app.post('/api/projects/:id/generations', async (req, res) => {
     const project = await projectsCollection.findOne({ _id: new ObjectId(projectId) });
     if (!project) {
       return res.status(404).json({ success: false, error: "Project not found" });
+    }
+
+    let chosenModel = "gemini-2.5-flash"; 
+    let temperature = 0.7;            
+    
+    if (user?.id) {
+      const prefs = await db.collection("user_preferences").findOne({ userId: user.id });
+      if (prefs && prefs.aiPreferences) {
+        if (prefs.aiPreferences.defaultModel) {
+          chosenModel = prefs.aiPreferences.defaultModel;
+        }
+        
+        const creativity = prefs.aiPreferences.creativityLevel;
+        if (creativity === "Low") temperature = 0.2;
+        else if (creativity === "High") temperature = 1.2;
+        else temperature = 0.7; // Medium
+      }
     }
     
     const geminiPrompt = `
@@ -250,15 +308,25 @@ app.post('/api/projects/:id/generations', async (req, res) => {
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: geminiPrompt
+     model: chosenModel, 
+      contents: geminiPrompt,
+      config: {
+        temperature: temperature 
+      }
     });
 
     const generatedOutput = response.text;
     const newGeneration = {
       projectId: new ObjectId(projectId), 
+      projectName: project.projectName, // 
+      generationType: generationType || "Full Blueprint",
       prompt,
       generatedOutput,
+      status: "Completed",
+      user: user?.name,
+      userId: user?.id || null, 
+      createdAt: new Date(),
+      updatedAt: new Date(),
       createdAt: new Date()
     };
     const result = await aiGenerationsCollection.insertOne(newGeneration);
@@ -298,6 +366,401 @@ app.get('/api/projects/:id/generations', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// 
+app.get('/api/generations', async (req, res) => {
+  try {
+
+    const generations = await aiGenerationsCollection.find({}).sort({ createdAt: -1 }).toArray();
+    
+    res.status(200).json({
+      success: true,
+      count: generations.length,
+      generations
+    });
+  } catch (error) {
+    console.error("Error in GET /api/generations:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch('/api/generations/:id', async (req, res) => {
+  try {
+    const generationId = req.params.id;
+    const { generatedOutput, prompt, generationType } = req.body;
+
+    const updateData = {
+      updatedAt: new Date()
+    };
+
+    if (generatedOutput !== undefined) updateData.generatedOutput = generatedOutput;
+    if (prompt !== undefined) updateData.prompt = prompt;
+    if (generationType !== undefined) updateData.generationType = generationType;
+
+    const result = await aiGenerationsCollection.updateOne(
+      { _id: new ObjectId(generationId) },
+      { $set: updateData }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ success: false, error: "Generation log not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Generation history log updated successfully"
+    });
+  } catch (error) {
+    console.error("Error in PATCH /api/generations/:id:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+// ৪. POST /api/generations/:id/regenerate 
+app.post('/api/generations/:id/regenerate', async (req, res) => {
+  try {
+    const generationId = req.params.id;
+
+    const oldGen = await aiGenerationsCollection.findOne({ _id: new ObjectId(generationId) });
+    if (!oldGen) {
+      return res.status(404).json({ success: false, error: "Original generation log not found" });
+    }
+    const project = await projectsCollection.findOne({ _id: oldGen.projectId });
+    if (!project) {
+      return res.status(404).json({ success: false, error: "Associated project context lost" });
+    }
+
+    const geminiPrompt = `
+      You are DevPilot Copilot, an expert AI software engineer. 
+      You are helping the user rebuild/regenerate a solution.
+      
+      [PROJECT CONTEXT]
+      Project Name: ${project.projectName}
+      Category: ${project.category}
+      Target Users/Scale: ${project.targetUsers}
+      Tech Stack: ${project.selectedTech ? project.selectedTech.join(", ") : "Not specified"}
+      
+      [USER'S ORIGINAL REQUEST]
+      "${oldGen.prompt}"
+      
+      Instructions: Regenerate the solution. Provide improved, clean, and optimized code or response that fits perfectly.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: geminiPrompt
+    });
+
+    const newOutput = response.text;
+
+    await aiGenerationsCollection.updateOne(
+      { _id: new ObjectId(generationId) },
+      { 
+        $set: { 
+          generatedOutput: newOutput,
+          status: "Completed",
+          updatedAt: new Date()
+        } 
+
+      }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Regenerated successfully",
+      generatedOutput: newOutput
+    });
+
+  } catch (error) {
+    console.error("Error in REGENERATE route:", error);
+    await aiGenerationsCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { status: "Failed", updatedAt: new Date() } }
+    ).catch(() => {});
+    
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+// ৫. DELETE /api/generations/:id
+app.delete('/api/generations/:id', async (req, res) => {
+  try {
+    const generationId = req.params.id;
+
+    const result = await aiGenerationsCollection.deleteOne({ _id: new ObjectId(generationId) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ success: false, error: "Generation log not found or already deleted" });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "AI Generation log deleted successfully from history"
+    });
+  } catch (error) {
+    console.error("Error in DELETE /api/generations/:id:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.get('/api/profile/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
+    }
+    
+    const userBase = await db.collection("user").findOne({ _id: new ObjectId(userId) });
+
+    if (!userBase) {
+      return res.status(404).json({ success: false, error: "User account node not found" });
+    }
+    
+    const profileExtra = await db.collection("profiles").findOne({ userId: userId });
+  
+    const completeProfile = {
+      name: userBase.name || "",
+      email: userBase.email || "",
+      image: userBase.image || "",
+      memberSince: userBase.createdAt, 
+      bio: profileExtra?.bio || "",
+      country: profileExtra?.country || "",
+      jobTitle: profileExtra?.jobTitle || "",
+      skills: profileExtra?.skills || [],
+      experience: profileExtra?.experience || 0,
+      preferredTechStack: profileExtra?.preferredTechStack || [],
+      currentRole: profileExtra?.currentRole || "",
+      github: profileExtra?.github || "",
+      linkedin: profileExtra?.linkedin || "",
+      portfolio: profileExtra?.portfolio || "",
+      twitter: profileExtra?.twitter || ""
+    };
+
+    const projectsCount = await db.collection("projects").countDocuments({ userId: userId });
+    const aiGenerationsCount = await db.collection("ai_generations").countDocuments({ userId: userId }); 
+    const readmeExportsCount = await db.collection("exports").countDocuments({ userId: userId }); 
+    const recentProjects = await db.collection("projects")
+      .find({ userId: userId })
+      .sort({ createdAt: -1 }) 
+      .limit(3)
+      .toArray();
+    const achievements = [];
+    if (projectsCount > 0) {
+      achievements.push({ 
+        title: "First Blueprint Created", 
+        badge: "", 
+        desc: "Successfully deployed your first project blueprint." 
+      });
+    }
+    if (aiGenerationsCount >= 50) {
+      achievements.push({ 
+        title: "Power Generator", 
+        badge: "", 
+        desc: "Completed over 50 deep AI generation tokens." 
+      });
+    } else {
+      achievements.push({ 
+        title: "Initiated Core Engine", 
+        badge: "", 
+        desc: "Started using AI generation pipelines." 
+      });
+    }
+    res.status(200).json({ 
+      success: true, 
+      profile: completeProfile,
+      stats: {
+        projectsCount,
+        aiGenerationsCount,
+        readmeExportsCount,
+        achievementsCount: achievements.length
+      },
+      recentProjects,
+      achievements
+    });
+
+  } catch (error) {
+    console.error("Error in GET /api/profile:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/profile/update', async (req, res) => {
+  try {
+    const { 
+      userId, bio, country, jobTitle, skills, 
+      experience, preferredTechStack, currentRole, 
+      github, linkedin, portfolio, twitter 
+    } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
+    }
+    const updatedProfile = {
+      userId,
+      bio: bio || "",
+      country: country || "",
+      jobTitle: jobTitle || "",
+      skills: Array.isArray(skills) ? skills : [],
+      experience: Number(experience) || 0,
+      preferredTechStack: Array.isArray(preferredTechStack) ? preferredTechStack : [],
+      currentRole: currentRole || "",
+      github: github || "",
+      linkedin: linkedin || "",
+      portfolio: portfolio || "",
+      twitter: twitter || "",
+      updatedAt: new Date()
+    };
+
+    const result = await db.collection("profiles").updateOne(
+      { userId: userId },
+      { 
+        $set: updatedProfile,
+        $setOnInsert: { createdAt: new Date() } 
+      },
+      { upsert: true }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Profile dimensions synchronized successfully!",
+      data: result
+    });
+
+  } catch (error) {
+    console.error("Error in POST /api/profile/update:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+
+
+
+  
+
+// ১. PREFERENCES UPDATE (PATCH) 
+app.patch('/api/user/preferences', async (req, res) => {
+  try {
+    const { userId, aiPreferences, notifications, appearance, defaultExportFormat } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
+    }
+
+    const isRequestingProModel = aiPreferences?.defaultModel === "gemini-2.5-pro";
+    const isRequestingProExport = defaultExportFormat === "PDF" || defaultExportFormat === "DOCX";
+
+    if (isRequestingProModel || isRequestingProExport) {
+      const subscription = await db.collection("user_subscriptions").findOne({ 
+        userId: userId, 
+        status: "active" 
+      });
+
+      if (!subscription || subscription.plan !== "Pro") {
+        const errorMsg = isRequestingProModel 
+          ? "Access Denied: Gemini 2.5 Pro requires an active Architect Pro subscription."
+          : "Access Denied: PDF and DOCX document compiling requires Architect Pro.";
+          
+        return res.status(403).json({ success: false, error: errorMsg });
+      }
+    }
+    const result = await db.collection("user_preferences").updateOne(
+      { userId: userId },
+      {
+        $set: {
+          aiPreferences: aiPreferences || {},
+          notifications: notifications || {},
+          appearance: appearance || "system",
+          defaultExportFormat: defaultExportFormat || "Markdown",
+          updatedAt: new Date()
+        }
+      },
+      { upsert: true }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Preferences synchronized successfully",
+      data: result
+    });
+
+  } catch (error) {
+    console.error("Error in PATCH /api/user/preferences:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+// ২. PREFERENCES GET ROUTE
+app.get('/api/user/preferences/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
+    }
+
+    const prefs = await db.collection("user_preferences").findOne({ userId: userId });
+    
+    res.status(200).json({
+      success: true,
+      data: prefs || null 
+    });
+
+  } catch (error) {
+    console.error("Error in GET /api/user/preferences:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+// ৩. STRIPE CHECKOUT ROUTE
+
+app.post("/api/billing/checkout", async (req, res) => {
+  try {
+    const { userId, userEmail } = req.body;
+
+    if (!userId || !userEmail) {
+      return res.status(400).json({ success: false, error: "Missing identity metadata." });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      mode: "subscription", 
+      customer_email: userEmail,
+      client_reference_id: userId, 
+      
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: "DevPilot Architect Pro",
+              description: "Access Gemini 2.5 Pro, Premium Exporters, and Unlimited Architecture Nodes.",
+            },
+            unit_amount: 999, // $9.99
+            recurring: {
+              interval: "month", 
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: `${process.env.FRONTEND_URL}/dashboard/billing?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/dashboard/billing?canceled=true`,
+    });
+
+    res.status(200).json({ success: true, url: session.url });
+
+  } catch (error) {
+    console.error("Stripe Session Error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
 
     // text upore
 
