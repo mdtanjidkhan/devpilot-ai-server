@@ -110,7 +110,7 @@ async function run() {
         res.status(500).json({ success: false, error: error.message });
       }
     });
-  // dashboardpage dynamic name count or card data fetch
+  // dashboardpage dynamic name count
 
   app.get('/api/dashboard/stats', async (req, res) => {
   try {
