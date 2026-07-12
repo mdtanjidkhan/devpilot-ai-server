@@ -5,7 +5,7 @@ const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT;
 const uri = process.env.MONGODB_URI;
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
@@ -29,88 +29,127 @@ async function run() {
     const db = client.db("devpilot");
     const projectsCollection = db.collection("projects");
     const aiGenerationsCollection = db.collection("ai_generations");
+    // const paymentsCollection = db.collection("payments");
     const profilesCollection = db.collection("profiles");
     await profilesCollection.createIndex({ userId: 1 }, { unique: true });
     console.log("  Successfully connected to MongoDB and initialized collections!");
+
+  app.post('/api/generate-blueprint', async (req, res) => {
+  try {
+    const { projectName, category, description, targetUsers, selectedTech, userId } = req.body;
+
+    if (!projectName || !category || !description || !targetUsers || !userId) {
+      return res.status(400).json({ success: false, error: "Missing required fields" });
+    }
+    const currentProjectCount = await projectsCollection.countDocuments({ userId: userId });
     
-    app.post('/api/generate-blueprint', async (req, res) => {
-      try {
-        const { projectName, category, description, targetUsers, selectedTech, userId } = req.body;
+    if (currentProjectCount >= 5) {
+      return res.status(403).json({ 
+        success: false, 
+        error: "You have reached your free limit of 5 projects. Please upgrade to Premium!" 
+      });
+    }
+   
+    const prompt = `
+      You are an expert Software Architect. Analyze the following project requirements and generate a detailed production-ready software blueprint.
+      
+      Project Details:
+      - Name: ${projectName}
+      - Category: ${category}
+      - Description: ${description}
+      - Target Users: ${targetUsers}
+      - Preferred Tech Stack: ${selectedTech ? selectedTech.join(', ') : 'Not specified'}
 
-        if (!projectName || !category || !description || !targetUsers || !userId) {
-          return res.status(400).json({ success: false, error: "Missing required fields" });
-        }
+      CRITICAL JSON STRUCTURE REQUIREMENT: 
+      You must return a raw JSON object matching the schema below. 
+      Do NOT wrap the JSON inside markdown blocks like \`\`\`json or \`\`\`.
+      Inside the "fileStructure" and "schemaDesign" fields, provide the code or layout directly as plain text string without using any markdown code blocks (\`\`\`).
 
-        const prompt = `
-          You are an expert Software Architect. Analyze the following project requirements and generate a detailed production-ready software blueprint.
-          
-          Project Details:
-          - Name: ${projectName}
-          - Category: ${category}
-          - Description: ${description}
-          - Target Users: ${targetUsers}
-          - Preferred Tech Stack: ${selectedTech ? selectedTech.join(', ') : 'Not specified'}
+      Expected JSON Schema:
+      {
+        "overview": "Detailed architectural overview...",
+        "modules": [
+          "Module 1 description",
+          "Module 2 description"
+        ],
+        "fileStructure": "Plain text directory tree representation here (NO markdown blocks)",
+        "schemaDesign": "Plain text database schema layout or code here (NO markdown blocks)"
+      }
+    `;
 
-          CRITICAL JSON STRUCTURE REQUIREMENT: 
-          You must return a raw JSON object matching the schema below. 
-          Do NOT wrap the JSON inside markdown blocks like \`\`\`json or \`\`\`.
-          Inside the "fileStructure" and "schemaDesign" fields, provide the code or layout directly as plain text string without using any markdown code blocks (\`\`\`).
-
-          Expected JSON Schema:
-          {
-            "overview": "Detailed architectural overview...",
-            "modules": [
-              "Module 1 description",
-              "Module 2 description"
-            ],
-            "fileStructure": "Plain text directory tree representation here (NO markdown blocks)",
-            "schemaDesign": "Plain text database schema layout or code here (NO markdown blocks)"
-          }
-        `;
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: "application/json"
-          }
-        });
-
-        const aiResponseText = response.text.trim();
-        
-        let blueprintData;
-        try {
-          blueprintData = JSON.parse(aiResponseText);
-        } catch (jsonErr) {
-          console.error("Failed to parse AI response as JSON:", aiResponseText);
-          return res.status(500).json({ success: false, error: "AI response formatting error. Please try again." });
-        }
-
-        const newProject = {
-          userId,
-          projectName,
-          category,
-          description,
-          targetUsers,
-          selectedTech: selectedTech || [],
-          blueprint: blueprintData,
-          createdAt: new Date()
-        };
-
-        const result = await projectsCollection.insertOne(newProject);
-        console.log("Project blueprint saved with ID:", result.insertedId);
-        res.status(201).json({
-          success: true,
-          message: "Project blueprint generated and saved successfully",
-          projectId: result.insertedId
-        });
-
-      } catch (error) {
-        console.error("Error in /api/generate-blueprint:", error);
-        res.status(500).json({ success: false, error: error.message });
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json"
       }
     });
-  // dashboardpage dynamic name count
+
+    const aiResponseText = response.text.trim();
+    
+    let blueprintData;
+    try {
+      blueprintData = JSON.parse(aiResponseText);
+    } catch (jsonErr) {
+      console.error("Failed to parse AI response as JSON:", aiResponseText);
+      return res.status(500).json({ success: false, error: "AI response formatting error. Please try again." });
+    }
+
+    const newProject = {
+      userId,
+      projectName,
+      category,
+      description,
+      targetUsers,
+      selectedTech: selectedTech || [],
+      blueprint: blueprintData,
+      createdAt: new Date()
+    };
+
+    const result = await projectsCollection.insertOne(newProject);
+    console.log("Project blueprint saved with ID:", result.insertedId);
+
+    const newNotification = {
+      userId: userId, 
+      title: "Blueprint Generated",
+      message: `Your project "${projectName}" architectural blueprint is ready!`,
+      isRead: false,
+      createdAt: new Date()
+    };
+    await db.collection("notifications").insertOne(newNotification);
+    
+    res.status(201).json({
+      success: true,
+      message: "Project blueprint generated and saved successfully",
+      projectId: result.insertedId
+    });
+
+  } catch (error) {
+    console.error("Error in /api/generate-blueprint:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 
+app.get('/api/projects/count', async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "Missing userId parameter" });
+    }
+    const count = await projectsCollection.countDocuments({ userId: userId });
+
+    return res.status(200).json({
+      success: true,
+      count: count
+    });
+  } catch (error) {
+    console.error("Error fetching project count:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
   app.get('/api/dashboard/stats', async (req, res) => {
   try {
@@ -126,14 +165,42 @@ async function run() {
       .toArray();
 
     const totalProjects = projects.length;
-    
     const totalAiGenerations = await db.collection("ai_generations")
       .countDocuments({ userId: userId });
+
     const savedBlueprints = totalProjects; 
+    let subscription = await db.collection("subscriptions").findOne({ userId: userId });
+  
+    if (!subscription) {
+      subscription = {
+        plan: "Free",
+        tokenLimit: 50000,
+        currentUsage: 0
+      };
+    }
+    const chartDataRaw = await db.collection("ai_generations").aggregate([
+      { $match: { userId: userId } },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          tokens: { $sum: "$tokensUsed" }, 
+          blueprints: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } },
+      { $limit: 7 } 
+    ]).toArray();
+    const chartData = chartDataRaw.map(item => ({
+      name: item._id,
+      tokens: item.tokens || 0,
+      blueprints: item.blueprints || 0
+    }));
 
     res.status(200).json({
       success: true,
       projects,
+      subscription, 
+      chartData,    
       stats: {
         totalProjects,
         totalAiGenerations,
@@ -146,7 +213,6 @@ async function run() {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
 
    app.get('/api/projects/:id', async (req, res) => {
       try {
@@ -316,11 +382,13 @@ app.post('/api/projects/:id/generations', async (req, res) => {
     });
 
     const generatedOutput = response.text;
+    const tokensUsed = response.usageMetadata?.totalTokenCount || 3000;
     const newGeneration = {
       projectId: new ObjectId(projectId), 
       projectName: project.projectName, // 
       generationType: generationType || "Full Blueprint",
       prompt,
+      tokensUsed,
       generatedOutput,
       status: "Completed",
       user: user?.name,
@@ -330,7 +398,17 @@ app.post('/api/projects/:id/generations', async (req, res) => {
       createdAt: new Date()
     };
     const result = await aiGenerationsCollection.insertOne(newGeneration);
-
+     if (user?.id) { 
+      const newNotification = {
+        userId: user.id, 
+        title: ` AI Copilot Active`,
+        message: `New code/response generated for project "${project.projectName}".`,
+        isRead: false,
+        createdAt: new Date()
+      };
+      await db.collection("notifications").insertOne(newNotification);
+    }
+    
     res.status(201).json({
       success: true,
       message: "AI Generation completed and saved successfully",
@@ -347,7 +425,6 @@ app.post('/api/projects/:id/generations', async (req, res) => {
 });
 
 // 
-
 app.get('/api/projects/:id/generations', async (req, res) => {
   try {
     const projectId = req.params.id;
@@ -634,12 +711,7 @@ app.post('/api/profile/update', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
-
-
-
-
-  
+ 
 
 // ১. PREFERENCES UPDATE (PATCH) 
 app.patch('/api/user/preferences', async (req, res) => {
@@ -715,52 +787,77 @@ app.get('/api/user/preferences/:userId', async (req, res) => {
   }
 });
 
-
-// ৩. STRIPE CHECKOUT ROUTE
-
-app.post("/api/billing/checkout", async (req, res) => {
+// 
+ app.get("/api/notifications/:userId", async (req, res) => {
   try {
-    const { userId, userEmail } = req.body;
+    const { userId } = req.params;
 
-    if (!userId || !userEmail) {
-      return res.status(400).json({ success: false, error: "Missing identity metadata." });
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
     }
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      mode: "subscription", 
-      customer_email: userEmail,
-      client_reference_id: userId, 
-      
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: {
-              name: "DevPilot Architect Pro",
-              description: "Access Gemini 2.5 Pro, Premium Exporters, and Unlimited Architecture Nodes.",
-            },
-            unit_amount: 999, // $9.99
-            recurring: {
-              interval: "month", 
-            },
-          },
-          quantity: 1,
-        },
-      ],
-      success_url: `${process.env.FRONTEND_URL}/dashboard/billing?success=true&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/dashboard/billing?canceled=true`,
-    });
+    const notifications = await db.collection("notifications")
+      .find({ userId: userId })
+      .sort({ createdAt: -1 })
+      .toArray();
 
-    res.status(200).json({ success: true, url: session.url });
-
+    res.json({ success: true, data: notifications });
   } catch (error) {
-    console.error("Stripe Session Error:", error);
+    console.error("Error fetching notifications:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});   
+
+  app.patch("/api/notifications/read/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({ success: false, error: "Notification ID is required" });
+    }
+    const result = await db.collection("notifications").updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { isRead: true } }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({ success: false, error: "Notification not found or already read" });
+    }
+
+    res.json({ success: true, message: "Notification marked as read" });
+  } catch (error) {
+    console.error("Error updating notification status:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+app.delete('/api/user/delete-account/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
 
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
+    }
+    await projectsCollection.deleteMany({ userId: userId });
+
+    let userQuery = { _id: userId }; 
+    if (ObjectId.isValid(userId)) {
+      userQuery = { _id: new ObjectId(userId) };
+    }
+
+    const deleteUser = await db.collection('user').deleteOne(userQuery); 
+
+    if (deleteUser.deletedCount === 0) {
+      return res.status(404).json({ success: false, error: "User not found" });
+    }
+
+    res.json({ success: true, message: "Account and all associated data deleted permanently." });
+
+  } catch (error) {
+    console.error("Error deleting account:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
     // text upore
 
