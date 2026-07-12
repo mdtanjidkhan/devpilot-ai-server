@@ -348,7 +348,7 @@ app.post('/api/projects/:id/generations', async (req, res) => {
         const creativity = prefs.aiPreferences.creativityLevel;
         if (creativity === "Low") temperature = 0.2;
         else if (creativity === "High") temperature = 1.2;
-        else temperature = 0.7; // Medium
+        else temperature = 0.7; 
       }
     }
     
