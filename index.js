@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const { GoogleGenAI } = require('@google/genai');
+const { jwtVerify, createRemoteJWKSet } = require('jose-cjs');
 require('dotenv').config();
 
 const app = express();
@@ -19,6 +20,36 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   }
 });
+// jwt token
+
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.FRONTEND_URL}/api/auth/jwks`)
+);
+
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req?.headers?.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).send({ message: 'Unauthorized access: Missing token header' });
+  }
+
+  const token = authHeader.split(" ")[1];
+   console.log(token);
+  if (!token) {
+    return res.status(401).send({ message: 'Unauthorized access: Token not found' });
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    req.user = payload; 
+    console.log("Verified User Payload:", payload); // 
+    
+    next(); 
+  } catch (error) {
+    console.error("Token Verification Error:", error.message);
+    return res.status(403).send({ message: 'Forbidden access: Invalid or expired token' });
+  }
+};
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -34,7 +65,7 @@ async function run() {
     await profilesCollection.createIndex({ userId: 1 }, { unique: true });
     console.log("  Successfully connected to MongoDB and initialized collections!");
 
-  app.post('/api/generate-blueprint', async (req, res) => {
+  app.post('/api/generate-blueprint',verifyToken, async (req, res) => {
   try {
     const { projectName, category, description, targetUsers, selectedTech, userId } = req.body;
 
@@ -237,7 +268,7 @@ app.get('/api/projects/count', async (req, res) => {
     });
 
    // patch endpoint to update a specific section of the blueprint
-app.patch('/api/projects/:id', async (req, res) => {
+app.patch('/api/projects/:id',verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
         const { section, value } = req.body; 
@@ -320,7 +351,7 @@ app.patch('/api/projects/:id', async (req, res) => {
 
 // ai_generations endpoint to fetch all AI generations with pagination
 
-app.post('/api/projects/:id/generations', async (req, res) => {
+app.post('/api/projects/:id/generations',verifyToken, async (req, res) => {
   try {
     const projectId = req.params.id;
     const { prompt, generationType,user} = req.body;
@@ -461,7 +492,7 @@ app.get('/api/generations', async (req, res) => {
   }
 });
 
-app.patch('/api/generations/:id', async (req, res) => {
+app.patch('/api/generations/:id', verifyToken, async (req, res) => {
   try {
     const generationId = req.params.id;
     const { generatedOutput, prompt, generationType } = req.body;
@@ -664,7 +695,7 @@ app.get('/api/profile/:userId', async (req, res) => {
   }
 });
 
-app.post('/api/profile/update', async (req, res) => {
+app.post('/api/profile/update',verifyToken, async (req, res) => {
   try {
     const { 
       userId, bio, country, jobTitle, skills, 
@@ -867,8 +898,6 @@ app.delete('/api/user/delete-account/:userId', async (req, res) => {
 
 }
 
-
-
 run().catch(console.dir);
 
 app.get('/', (req, res) => {
@@ -877,5 +906,5 @@ app.get('/', (req, res) => {
 
 
 app.listen(port, () => {
-  console.log(`🚀 Server is running on port ${port}`);
+  console.log(` Server is running on port ${port}`);
 });
