@@ -270,7 +270,7 @@ app.get('/api/projects/count', async (req, res) => {
       }
     });
 
-   // patch endpoint to update a specific section of the blueprint
+   // patch endpoint to update a specific section of the blueprint y
 app.patch('/api/projects/:id',verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
