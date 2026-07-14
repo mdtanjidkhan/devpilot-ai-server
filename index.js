@@ -8,7 +8,6 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT;
 const uri = process.env.MONGODB_URI;
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 app.use(cors());
 app.use(express.json());
@@ -55,8 +54,10 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 async function run() {
   try {
+    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
-    
+
+
     const db = client.db("devpilot");
     const projectsCollection = db.collection("projects");
     const aiGenerationsCollection = db.collection("ai_generations");
@@ -65,7 +66,7 @@ async function run() {
     await profilesCollection.createIndex({ userId: 1 }, { unique: true });
     console.log("  Successfully connected to MongoDB and initialized collections!");
 
-  app.post('/api/generate-blueprint',verifyToken, async (req, res) => {
+  app.post('/api/generate-blueprint', async (req, res) => {
   try {
     const { projectName, category, description, targetUsers, selectedTech, userId } = req.body;
 
@@ -117,6 +118,8 @@ async function run() {
     });
 
     const aiResponseText = response.text.trim();
+    console.log("========== Gemini Response ==========");
+console.log(aiResponseText);
     
     let blueprintData;
     try {
@@ -889,15 +892,14 @@ app.delete('/api/user/delete-account/:userId', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
-    // text upore
-
-  } catch (err) {
-    console.error("MongoDB Initialization Error:", err);
+    // Send a ping to confirm a successful connection
+    await client.db("admin").command({ ping: 1 });
+    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+  } finally {
+    // Ensures that the client will close when you finish/error
+    // await client.close();
   }
-
 }
-
 run().catch(console.dir);
 
 app.get('/', (req, res) => {
