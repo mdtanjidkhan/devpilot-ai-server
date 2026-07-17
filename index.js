@@ -52,14 +52,11 @@ const verifyToken = async (req, res, next) => {
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// async function run() {
-//   try {
+async function run() {
+  try {
     // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
+    await client.connect();
 
-   client.connect(() =>{
-    console.log('connet to mongodb')
-   }).catch(console.dir)
 
     const db = client.db("devpilot");
     const projectsCollection = db.collection("projects");
@@ -896,14 +893,14 @@ app.delete('/api/user/delete-account/:userId', async (req, res) => {
   }
 });
     // Send a ping to confirm a successful connection
-    // await client.db("admin").command({ ping: 1 });
-//     console.log("Pinged your deployment. You successfully connected to MongoDB!");
-//   } finally {
-//     // Ensures that the client will close when you finish/error
-//     // await client.close();
-//   }
-// }
-// run().catch(console.dir);
+    await client.db("admin").command({ ping: 1 });
+    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+  } finally {
+    // Ensures that the client will close when you finish/error
+    // await client.close();
+  }
+}
+run().catch(console.dir);
 
 app.get('/', (req, res) => {
   res.send('DevPilot AI Server is Running...');
@@ -914,4 +911,4 @@ app.listen(port, () => {
   console.log(` Server is running on port ${port}`);
 });
 
-module.exports = app;
+
